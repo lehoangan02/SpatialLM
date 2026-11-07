@@ -386,6 +386,8 @@ class SpatialLMQwenForCausalLM(Qwen2ForCausalLM):
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
                 "point_clouds": kwargs.get("point_clouds", None),
+                # pass through so generate() computes logits for the last token only, not the whole prompt
+                "num_logits_to_keep": kwargs.get("num_logits_to_keep", 0),
             }
         )
         return model_inputs

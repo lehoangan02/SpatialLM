@@ -32,6 +32,11 @@ SpatialLM's point encoder (`spatiallm/model/sonata_encoder.py`) expects flash-at
   `torch.nn.functional.scaled_dot_product_attention`. The original code builds the full `(N', H, K, K)` attention
   matrix, which does not fit in 4 GB. The training path and the RPE path are unchanged.
 
+A later fix (§3.10), in `spatiallm/model/spatiallm_llama.py` and `spatiallm_qwen.py`: `prepare_inputs_for_generation`
+dropped `num_logits_to_keep`, so the first generation step computed and cloned logits for the whole prompt. Passing it
+through lowers peak VRAM by 0.12–0.19 GB. Outputs were byte-identical on scene0000_00 and scene0046_01 for both
+models. All results in §3.1–3.9 were measured before this fix.
+
 ### 1.3 Test data
 
 **Ground-truth subset.** 10 scenes from the SpatialLM test set (`SpatialLM-Testset/`, ScanNet-style rooms with
@@ -399,6 +404,29 @@ door and window panels, floor) and `room_with_scan.glb` (plus up to 300k scan po
 11–14 kB, and the versions with the scan were about 4.8 MB.
 
 ---
+
+### 3.10 One-command pipeline check (`stage3/pipeline.py`)
+
+`stage3/pipeline.py` runs the chosen configuration end to end. Running it on the raw room 2 scan
+(`~/Downloads/scan.ply`, 4.3M points) found three problems, each fixed and re-tested:
+
+| Problem | Symptom | Fix |
+|---|---|---|
+| Wrong up axis | The fixed `--up_hint -y` (MASt3R-SLAM camera frame) chose a horizontal axis: raw height 7.04, room on its side | `--up_hint auto`: the Manhattan axis with the smallest extent (3.52 vs 8.36 / 8.47 raw units); the sign comes from furniture tops in the lower half (71 % of mid-height horizontal surfaces). This reproduces the earlier manual alignment exactly (scale 0.772, height 3.368) |
+| Input too dense | Correctly aligned, SpatialLM's own 2.5 cm voxel still leaves 555k (cropped) / 604k (full) points. Llama-1B ran out of memory on every run; Qwen-0.5B fallback took 81–232 s per run and gave a fragmented layout (12 walls, 0 doors) | Thin each input to ≤ 120k points by growing the voxel in 0.5 cm steps (room 2: 5.0 cm, 118,989 points; the same size the earlier manual room 2 run used) |
+| Llama still out of memory at 67k–119k points | Peak VRAM stayed at 3.3 GB at every budget. The traceback was in `generate()` → `outputs.logits.clone()`, which allocates 306 MiB | `num_logits_to_keep` passthrough (§1.2) |
+| Furniture pass looped on the full cloud | 185 boxes in 365 s: 174 copies of `plants` centred outside the room | Furniture pass on the cropped cloud by default; drop exact repeats and boxes centred outside the footprint |
+
+Final run on room 2 (Llama-1B bf16, seeds 0–2, defaults):
+
+| Step | Result |
+|---|---|
+| `arch` seeds 0 / 1 / 2 | 30.8 s / 19.9 s / 21.1 s, peak 3.3 GB |
+| `object` seed 0 (cropped) | 29.6 s, 17 boxes (carpet, sofa, coffee table, stools, TV, curtains, …) |
+| Chosen seed | 0: 4 walls, 1 door, 2 windows, wall support 0.61. Identical to the manual room 2 result in §3.8 |
+| Total time | 175 s, including alignment, crop, model load and export |
+
+The `--aligned --model qwen --no_crop` options were checked on scene0046_01 (32.5 s, 4 walls, 1 door, 1 window, 7 boxes).
 
 ## 4. Conclusions
 

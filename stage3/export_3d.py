@@ -161,6 +161,20 @@ def write(parts, path, cloud=None):
         f.write(struct.pack("<II", len(g.bin), 0x004E4942) + bytes(g.bin))
 
 
+def export(layout_path, out_path, point_cloud=None, max_points=300_000, thickness=0.1):
+    """Layout txt -> .glb, optionally with up to max_points scan points."""
+    layout = Layout(open(layout_path).read())
+    cloud = None
+    if point_cloud:
+        import open3d as o3d
+        pc = o3d.io.read_point_cloud(point_cloud)
+        P, C = np.asarray(pc.points), np.asarray(pc.colors)
+        keep = np.random.default_rng(0).choice(len(P), min(max_points, len(P)), replace=False)
+        cloud = (P[keep], C[keep])
+    write(build(layout, thickness), out_path, cloud)
+    return layout
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("layout")
@@ -169,13 +183,5 @@ if __name__ == "__main__":
     ap.add_argument("--max_points", type=int, default=300_000)
     ap.add_argument("--thickness", type=float, default=0.1)
     a = ap.parse_args()
-    layout = Layout(open(a.layout).read())
-    cloud = None
-    if a.point_cloud:
-        import open3d as o3d
-        pc = o3d.io.read_point_cloud(a.point_cloud)
-        P, C = np.asarray(pc.points), np.asarray(pc.colors)
-        keep = np.random.default_rng(0).choice(len(P), min(a.max_points, len(P)), replace=False)
-        cloud = (P[keep], C[keep])
-    write(build(layout, a.thickness), a.out, cloud)
+    layout = export(a.layout, a.out, a.point_cloud, a.max_points, a.thickness)
     print(f"{len(layout.walls)} walls, {len(layout.doors)} doors, {len(layout.windows)} windows -> {a.out} ({os.path.getsize(a.out) / 1e6:.2f} MB)")
