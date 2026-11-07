@@ -149,6 +149,18 @@ in the `RESULT` line and in `runlog.json`. If that happens:
 2. If all seeds fail, or the `object` pass fails, rerun that step with
    `--model_path models/SpatialLM1.1-Qwen-0.5B --dtype float16`. Qwen peaks at about 2.5 GB.
 
+### Known failure cases
+
+Found on RoSE scans (TESTING.md §3.11). Check `seeds.png` and `summary.json` after every run.
+
+| Symptom | Cause | Workaround |
+|---|---|---|
+| `scale factor` far from 1 (e.g. 30) and a huge `aligned.ply` extent | `--up_hint auto` took a horizontal axis (partial room scans) | Rerun with `--up_hint=-y` (write `=`: `--up_hint -y` is parsed as a new option) or the axis that is up in the input |
+| Every `arch` run takes ~35 s and the chosen seed has wall support 0.00 | SpatialLM looped (the same wall repeated until the length limit) | Rerun with `--no_crop`, or with a smaller `--max_input_points` |
+| `IndexError: pop from empty list` in `export_3d.py` `floor_loop` | No seed has any wall left after snapping | As above |
+| Many identical doors or windows in `layout.txt` | SpatialLM repeats; only boxes are de-duplicated | Remove exact repeats by hand |
+| `OSError: Error no file named ... model.safetensors` after "retrying with qwen" | Qwen weights not downloaded | Download `models/SpatialLM1.1-Qwen-0.5B`, or use `--no_fallback` |
+
 ## Evaluating on the test set
 
 ```bash

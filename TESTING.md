@@ -428,6 +428,41 @@ Final run on room 2 (Llama-1B bf16, seeds 0–2, defaults):
 
 The `--aligned --model qwen --no_crop` options were checked on scene0046_01 (32.5 s, 4 walls, 1 door, 1 window, 7 boxes).
 
+### 3.11 RoSE scans on an L40S (`stage3/pipeline.py`, defaults first)
+
+Three MASt3R-SLAM clouds from the RoSE dataset (`rabbitKabbit/RoSE-Robotic-Spatial-Environment` on Hugging Face) were
+run with `stage3/pipeline.py` on an NVIDIA L40S (46 GB), torch 2.4.1+cu124, no flash-attn (SDPA fallback),
+Llama-1B bf16, seeds 0–2, `--ceiling_height 2.6`. The Qwen fallback was never needed. Only one of the three worked
+with the defaults:
+
+| Scan | Options | Alignment (raw height → scale) | SpatialLM input | `arch` seeds 0 / 1 / 2 | Result |
+|---|---|---|---|---|---|
+| I87X MasterSlam1 (uncalibrated, 3.2M pts) | defaults | 2.485 → 1.046 | cropped, thinned 3.0 cm → 116,613 pts | 2.4 / 3.8 / 2.2 s | seed 1, wall support 0.29: 4 walls, 2 doors, 15 windows, 3 boxes; 33 s total |
+| P64 MasterSlam1 (3.8M pts, partial room: SLAM lost tracking after 10 s) | defaults | 0.085 → **30.6** | cropped, thinned 29.0 cm → 118,284 pts | 35.2 / 34.7 / 34.6 s | `object` empty → Qwen retry (not installed) → crash |
+| | `--up_hint=-y` | 4.072 → 0.639 | cropped, 519,628 pts, not thinned | 5.3 / 34.6 / 34.9 s | seed 0, wall support 0.31 (seeds 1, 2: 0.03, 0.00): 6 walls, 4 doors, 1 window, 8 boxes; 88 s |
+| I87X MasterSlam2 (ARCore intrinsics, 3.2M pts) | defaults | 2.407 → 1.080 | cropped, 488,730 pts, not thinned | 36.2 / 35.6 / 35.4 s | every seed: `wall_0` … `wall_184`, all the same zero-length wall; 0 walls after snapping; `export_3d.floor_loop` → `IndexError: pop from empty list` |
+| | `--max_input_points 100000` | same | cropped, thinned 3.0 cm → 74,843 pts | 35.5 / 5.3 / 34.7 s | seed 1, wall support 0.19 (seeds 0, 2 empty): 4 walls, 14 doors (2 distinct, repeated 8× and 5×), 12 windows; 96 s |
+| | `--no_crop` | same | full, thinned 4.5 cm → 114,969 pts | 4.5 / 1.4 / 3.3 s | seed 0, wall support 0.29 (all seeds valid): 7 walls, 2 doors, 4 windows, 2 boxes; 34 s |
+
+"Not thinned" means the cloud was already under the 120k budget after SpatialLM's own cleanup voxel, so the loop in
+`SpatialLM._input` never ran.
+
+Problems found:
+
+1. **`--up_hint auto` failed on a partial room.** P64 covers only part of the room, so the smallest Manhattan extent was
+   a horizontal axis: raw height 0.085, scale ×30.6, a 280 m long "room". The camera axis `-y` worked here, while on
+   room 2 (§3.10) `-y` failed and `auto` worked. Neither is reliable on its own. A raw height far from the
+   other two extents, or a scale far from 1 for MASt3R-SLAM metric output, is a cheap check.
+2. **SpatialLM loops on some inputs, and the seeds do not help.** The I87X MasterSlam2 cropped cloud gave the same
+   degenerate output on all three seeds. The same scan's full cloud worked on all three. A looping run is easy to
+   spot: it runs to the length limit (about 35 s per run here, against 1–6 s for a normal run).
+3. **Repeated walls, doors and windows are kept.** The pipeline drops repeated furniture boxes but not repeated
+   architecture: 11 identical windows (I87X MasterSlam1) and 8 + 5 identical doors (the 100k run above) reach `layout.txt`.
+4. **No clean failure when every seed has 0 walls.** The best seed is chosen with wall support 0.00 and
+   `export_3d.py` crashes in `floor_loop` instead of exiting with a message, so no `.glb` and no `summary.json` are written.
+5. **The Qwen fallback crashes the run if the Qwen weights are missing** (`OSError: Error no file named ...
+   model.safetensors`) instead of keeping the Llama results that did finish.
+
 ## 4. Conclusions
 
 1. **SpatialLM 1.1 runs on a 4 GB Turing GPU** with the SDPA fallback in `sonata_encoder.py`. Qwen-0.5B fits
