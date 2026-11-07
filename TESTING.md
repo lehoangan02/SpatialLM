@@ -462,6 +462,14 @@ Problems found:
    `export_3d.py` crashes in `floor_loop` instead of exiting with a message, so no `.glb` and no `summary.json` are written.
 5. **The Qwen fallback crashes the run if the Qwen weights are missing** (`OSError: Error no file named ...
    model.safetensors`) instead of keeping the Llama results that did finish.
+6. **A corner gap broke the main room in the `.glb` (fixed in `export_3d.py`).** In P63 (seed 1) the main room's
+   left wall stopped 15.5 cm short of the bottom wall. SpatialLM's raw output already had a 13 cm gap there. The
+   `floor_loop` tolerance is 5 cm, so the main room never closed. `hyb_snap` had squeezed the side bathroom to a
+   12 cm wide strip, and that strip became the only closed region. The floor was drawn only in the strip, and
+   `trim_to_loop` cut the 5.6 m bottom wall down to 12 cm. Fix: `close_gaps` moves dangling wall ends (more than
+   5 cm from every other wall) onto the nearest crossing wall line within 20 cm, before the floor loop is traced.
+   If the loop still covers under 25 % of the walls' convex hull, walls are not trimmed and the hull becomes the
+   floor. After the fix P63 has a 25.7 m² floor and a full bottom wall. The other four RoSE rooms export unchanged.
 
 ## 4. Conclusions
 

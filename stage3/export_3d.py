@@ -56,14 +56,61 @@ def wall_blocks(L, H, cuts, t):
     return [b for b in blocks if b[1] - b[0] > SLIVER and b[3] - b[2] > SLIVER]
 
 
+def _segments(walls):
+    """Wall objects or (a, b) pairs -> list of (a, b) float arrays in the floor plane."""
+    return [(np.asarray(w[0], float), np.asarray(w[1], float)) if isinstance(w, tuple)
+            else (np.array([w.ax, w.ay], float), np.array([w.bx, w.by], float)) for w in walls]
+
+
+def _point_seg_dist(p, a, b):
+    d = b - a
+    L2 = d @ d
+    s = 0.0 if L2 < 1e-12 else min(max((p - a) @ d / L2, 0.0), 1.0)
+    return np.linalg.norm(p - (a + s * d))
+
+
+def close_gaps(segs, tol=0.05, snap=0.2, min_angle=30.0):
+    """Move dangling wall ends onto the nearest crossing wall line, so small gaps at corners don't break the room.
+
+    An end is dangling when it is farther than `tol` from every other wall. It moves along its own wall to where
+    that wall's line meets another, non-parallel wall (at least `min_angle` apart). The meeting point must be
+    within `snap` of the end and on (or within `snap` of) the other wall. This extends walls that stop short of a
+    corner and cuts back walls that run past one. Ends with no such wall stay where they are.
+    """
+    segs = [(a.copy(), b.copy()) for a, b in segs]
+    cos_max = math.cos(math.radians(min_angle))
+    for i in range(len(segs)):
+        for e in (0, 1):
+            a, b = segs[i]
+            p, d = (a, b - a) if e == 0 else (b, a - b)  # d points from the end into the wall
+            L = np.linalg.norm(d)
+            if L < tol or any(_point_seg_dist(p, *segs[j]) < tol for j in range(len(segs)) if j != i):
+                continue
+            t = d / L
+            best = None
+            for j, (c, f_end) in enumerate(segs):
+                f = f_end - c
+                M = np.linalg.norm(f)
+                if j == i or M < tol or abs(t @ f / M) > cos_max:
+                    continue
+                den = np.cross(t, f)
+                s, u = np.cross(c - p, f) / den, np.cross(c - p, t) / den  # p + s t = c + u f
+                q = p + s * t
+                if abs(s) < snap and -snap / M < u < 1 + snap / M and s < L - tol and (best is None or abs(s) < abs(best[0])):
+                    best = (s, q)
+            if best is not None:
+                segs[i] = (best[1], b) if e == 0 else (a, best[1])
+    return segs
+
+
 def floor_loop(walls, tol=0.05):
     """Largest region enclosed by the wall centre lines, counter-clockwise.
 
     Walls are split where they cross or touch, dangling stubs (a wall running past a corner) are pruned, and the
     biggest bounded face of the resulting planar graph is traced. Chaining raw endpoints instead gives a
-    self-overlapping polygon when a wall overshoots a corner.
+    self-overlapping polygon when a wall overshoots a corner. `walls` are wall objects or (a, b) pairs.
     """
-    segs = [(np.array([w.ax, w.ay], float), np.array([w.bx, w.by], float)) for w in walls]
+    segs = _segments(walls)
     nodes = []
 
     def node(p):
@@ -176,16 +223,51 @@ def trim_to_loop(a, b, loop, tol=0.05):
     return (a + s0 * t, a + s1 * t) if s1 - s0 > tol else (a, b)
 
 
-def build(layout, thickness):
-    """Returns {part: [(verts, normals, tris), ...]} in the source frame."""
+def poly_area(poly):
+    return 0.5 * abs(np.sum(poly[:, 0] * np.roll(poly[:, 1], -1) - np.roll(poly[:, 0], -1) * poly[:, 1]))
+
+
+def convex_hull(pts):
+    """Counter-clockwise convex hull (monotone chain)."""
+    pts = sorted(map(tuple, np.round(pts, 9)))
+    if len(pts) < 3:
+        return np.array(pts, float).reshape(-1, 2)
+
+    def half(seq):
+        h = []
+        for p in seq:
+            while len(h) >= 2 and np.cross(np.subtract(h[-1], h[-2]), np.subtract(p, h[-2])) <= 0:
+                h.pop()
+            h.append(p)
+        return h[:-1]
+
+    return np.array(half(pts) + half(pts[::-1]), float)
+
+
+def build(layout, thickness, min_floor_frac=0.25):
+    """Returns {part: [(verts, normals, tris), ...]} in the source frame.
+
+    Gaps at corners are closed first (close_gaps). If the floor loop still covers less than `min_floor_frac` of the
+    walls' convex hull (it found a small closed pocket, not the room), walls are not trimmed to it and the floor
+    is the hull instead.
+    """
     parts = {k: [] for k in COLOURS}
-    cx = np.mean([[w.ax, w.ay] for w in layout.walls] + [[w.bx, w.by] for w in layout.walls], axis=0)
+    segs = close_gaps(_segments(layout.walls))
+    ends = np.array([p for s in segs for p in s]).reshape(-1, 2)
+    cx = ends.mean(0) if len(ends) else np.zeros(2)
     openings = [("door", o) for o in layout.doors] + [("window", o) for o in layout.windows]
-    loop = floor_loop(layout.walls)
+    loop = floor_loop(segs)
+    hull = convex_hull(ends) if len(ends) >= 3 else np.empty((0, 2))
+    if len(loop) >= 3 and len(hull) >= 3 and poly_area(loop) < min_floor_frac * poly_area(hull):
+        print(f"[export_3d] floor loop covers {poly_area(loop):.2f} of {poly_area(hull):.2f} m2 wall hull; "
+              "not trimming walls, using the hull as floor", file=sys.stderr)
+        loop, trim_loop = hull, np.empty((0, 2))
+    else:
+        trim_loop = loop
     if len(loop) >= 3:
         cx = loop.mean(0)
-    for w in layout.walls:
-        a2, b2 = trim_to_loop(np.array([w.ax, w.ay], float), np.array([w.bx, w.by], float), loop)
+    for w, (a0, b0) in zip(layout.walls, segs):
+        a2, b2 = trim_to_loop(a0, b0, trim_loop)
         a, b = np.r_[a2, 0.0], np.r_[b2, 0.0]
         L = np.linalg.norm(b - a)
         t = (b - a) / L
