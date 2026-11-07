@@ -57,17 +57,123 @@ def wall_blocks(L, H, cuts, t):
 
 
 def floor_loop(walls, tol=0.05):
-    segs = [(np.array([w.ax, w.ay]), np.array([w.bx, w.by])) for w in walls]
-    first = segs.pop(0)
-    loop, cur = [first[0], first[1]], first[1]
-    while segs:
-        k = next((i for i, (a, b) in enumerate(segs) if min(np.linalg.norm(a - cur), np.linalg.norm(b - cur)) < tol), None)
-        if k is None:
+    """Largest region enclosed by the wall centre lines, counter-clockwise.
+
+    Walls are split where they cross or touch, dangling stubs (a wall running past a corner) are pruned, and the
+    biggest bounded face of the resulting planar graph is traced. Chaining raw endpoints instead gives a
+    self-overlapping polygon when a wall overshoots a corner.
+    """
+    segs = [(np.array([w.ax, w.ay], float), np.array([w.bx, w.by], float)) for w in walls]
+    nodes = []
+
+    def node(p):
+        for i, q in enumerate(nodes):
+            if np.linalg.norm(p - q) < tol:
+                return i
+        nodes.append(p)
+        return len(nodes) - 1
+
+    # split points along each segment: its ends, crossings with other walls, other walls' ends lying on it
+    edges = set()
+    for i, (a, b) in enumerate(segs):
+        d = b - a
+        L = np.linalg.norm(d)
+        if L < tol:
+            continue
+        ts = [0.0, 1.0]
+        for j, (c, e) in enumerate(segs):
+            if j == i:
+                continue
+            for p in (c, e):  # T-junction / touching end
+                s = (p - a) @ d / L ** 2
+                if -tol / L < s < 1 + tol / L and abs(np.cross(d, p - a)) / L < tol:
+                    ts.append(min(max(s, 0.0), 1.0))
+            f = e - c
+            den = np.cross(d, f)
+            if abs(den) > 1e-9:  # proper crossing
+                s, u = np.cross(c - a, f) / den, np.cross(c - a, d) / den
+                if -tol / L < s < 1 + tol / L and -tol / np.linalg.norm(f) < u < 1 + tol / np.linalg.norm(f):
+                    ts.append(min(max(s, 0.0), 1.0))
+        ids = [node(a + s * d) for s in sorted(ts)]
+        edges |= {(min(p, q), max(p, q)) for p, q in zip(ids, ids[1:]) if p != q}
+
+    adj = {k: set() for k in range(len(nodes))}
+    for p, q in edges:
+        adj[p].add(q), adj[q].add(p)
+    leaves = [k for k in adj if len(adj[k]) == 1]
+    while leaves:  # prune stubs
+        k = leaves.pop()
+        for m in adj.pop(k, ()):
+            adj[m].discard(k)
+            if len(adj[m]) == 1:
+                leaves.append(m)
+    if not any(adj.values()):
+        return np.empty((0, 2))
+
+    # face tracing: from half-edge u->v, continue with the edge at v that turns most clockwise
+    P = np.array(nodes)
+    ang = {(u, v): math.atan2(*(P[v] - P[u])[::-1]) for u in adj for v in adj[u]}
+    seen, best, best_area = set(), None, 0.0
+    for start in ang:
+        if start in seen:
+            continue
+        face, (u, v) = [], start
+        while (u, v) not in seen:
+            seen.add((u, v))
+            face.append(u)
+            back = ang[(v, u)]
+            w = min((x for x in adj[v] if x != u or len(adj[v]) == 1),
+                    key=lambda x: (back - ang[(v, x)]) % (2 * math.pi) or 2 * math.pi)
+            u, v = v, w
+        poly = P[face]
+        area = 0.5 * np.sum(poly[:, 0] * np.roll(poly[:, 1], -1) - np.roll(poly[:, 0], -1) * poly[:, 1])
+        if area > best_area:  # bounded faces come out counter-clockwise (positive area)
+            best, best_area = poly, area
+    return best if best is not None else np.empty((0, 2))
+
+
+def ear_clip(poly):
+    """Triangulate a simple counter-clockwise polygon; returns index triples."""
+    idx, tris = list(range(len(poly))), []
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    while len(idx) > 3:
+        for k in range(len(idx)):
+            i, j, m = idx[k - 1], idx[k], idx[(k + 1) % len(idx)]
+            a, b, c = poly[i], poly[j], poly[m]
+            if cross(a, b, c) <= 1e-12:
+                continue  # reflex or collinear
+            if any(cross(a, b, poly[x]) >= 0 and cross(b, c, poly[x]) >= 0 and cross(c, a, poly[x]) >= 0
+                   for x in idx if x not in (i, j, m)):
+                continue
+            tris.append((i, j, m))
+            idx.pop(k)
             break
-        a, b = segs.pop(k)
-        cur = b if np.linalg.norm(a - cur) < tol else a
-        loop.append(cur)
-    return np.array(loop[:-1] if np.linalg.norm(loop[0] - loop[-1]) < tol else loop)
+        else:  # degenerate leftovers: drop a collinear vertex
+            idx.pop(next((k for k in range(len(idx)) if abs(cross(poly[idx[k - 1]], poly[idx[k]], poly[idx[(k + 1) % len(idx)]])) < 1e-9), 0))
+    if len(idx) == 3 and cross(*poly[idx]) > 1e-12:
+        tris.append(tuple(idx))
+    return np.array(tris, dtype=int).reshape(-1, 3)
+
+
+def trim_to_loop(a, b, loop, tol=0.05):
+    """Clip wall a-b to the stretch covered by floor-loop edges lying on it, so a wall overshooting a corner
+    ends at the corner. Walls with no loop edge on them (interior walls) are returned unchanged."""
+    d = b - a
+    L = np.linalg.norm(d)
+    if L < tol or len(loop) < 3:
+        return a, b
+    t = d / L
+    ss = []
+    for p, q in zip(loop, np.roll(loop, -1, axis=0)):
+        if all(abs(np.cross(t, x - a)) < tol for x in (p, q)):
+            ss += [(p - a) @ t, (q - a) @ t]
+    if not ss:
+        return a, b
+    s0, s1 = max(min(ss), 0.0), min(max(ss), L)
+    return (a + s0 * t, a + s1 * t) if s1 - s0 > tol else (a, b)
 
 
 def build(layout, thickness):
@@ -75,8 +181,12 @@ def build(layout, thickness):
     parts = {k: [] for k in COLOURS}
     cx = np.mean([[w.ax, w.ay] for w in layout.walls] + [[w.bx, w.by] for w in layout.walls], axis=0)
     openings = [("door", o) for o in layout.doors] + [("window", o) for o in layout.windows]
+    loop = floor_loop(layout.walls)
+    if len(loop) >= 3:
+        cx = loop.mean(0)
     for w in layout.walls:
-        a, b = np.array([w.ax, w.ay, 0.0]), np.array([w.bx, w.by, 0.0])
+        a2, b2 = trim_to_loop(np.array([w.ax, w.ay], float), np.array([w.bx, w.by], float), loop)
+        a, b = np.r_[a2, 0.0], np.r_[b2, 0.0]
         L = np.linalg.norm(b - a)
         t = (b - a) / L
         n = np.array([t[1], -t[0], 0.0])
@@ -97,13 +207,9 @@ def build(layout, thickness):
         for u0, u1, z0, z1 in wall_blocks(L, w.height, cuts, thickness):
             c = a + t * (u0 + u1) / 2 + n * thickness / 2 + np.array([0, 0, (z0 + z1) / 2])
             parts["wall"].append(box(c, t, n, (u1 - u0, thickness, z1 - z0)))
-    loop = floor_loop(layout.walls)
-    centre = np.r_[loop.mean(0), 0.0]
-    v = np.vstack([centre] + [np.r_[p, 0.0] for p in loop])
-    m = len(loop)
-    tris = np.array([(0, 1 + i, 1 + (i + 1) % m) for i in range(m)])
-    e = np.cross(v[tris[0, 1]] - v[0], v[tris[0, 2]] - v[0])
-    parts["floor"].append((v, np.tile([0, 0, 1.0], (m + 1, 1)), tris if e[2] > 0 else tris[:, ::-1]))
+    tris = ear_clip(loop) if len(loop) >= 3 else np.empty((0, 3), int)
+    if len(tris):  # counter-clockwise in xy -> faces +z
+        parts["floor"].append((np.c_[loop, np.zeros(len(loop))], np.tile([0, 0, 1.0], (len(loop), 1)), tris))
     return parts
 
 
