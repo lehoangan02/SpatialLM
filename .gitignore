@@ -166,3 +166,7 @@ cython_debug/
 *.txt
 *.rrd
 *.ply
+# Local model weights, test data and pipeline outputs
+models/
+SpatialLM-Testset/
+outputs/

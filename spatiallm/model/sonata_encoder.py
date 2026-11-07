@@ -448,18 +448,25 @@ class SerializedAttention(PointModule):
             q, k, v = (
                 qkv.reshape(-1, K, 3, H, C // H).permute(2, 0, 3, 1, 4).unbind(dim=0)
             )
-            # attn
-            if self.upcast_attention:
-                q = q.float()
-                k = k.float()
-            attn = (q * self.scale) @ k.transpose(-2, -1)  # (N', H, K, K)
-            if self.enable_rpe:
-                attn = attn + self.rpe(self.get_rel_pos(point, order))
-            if self.upcast_softmax:
-                attn = attn.float()
-            attn = self.softmax(attn)
-            attn = self.attn_drop(attn).to(qkv.dtype)
-            feat = (attn @ v).transpose(1, 2).reshape(-1, C)
+            if not self.enable_rpe and not self.training:
+                # memory-efficient fused attention, avoids materializing (N', H, K, K)
+                feat = torch.nn.functional.scaled_dot_product_attention(
+                    q.float(), k.float(), v.float(), scale=self.scale
+                ).to(qkv.dtype)
+                feat = feat.transpose(1, 2).reshape(-1, C)
+            else:
+                # attn
+                if self.upcast_attention:
+                    q = q.float()
+                    k = k.float()
+                attn = (q * self.scale) @ k.transpose(-2, -1)  # (N', H, K, K)
+                if self.enable_rpe:
+                    attn = attn + self.rpe(self.get_rel_pos(point, order))
+                if self.upcast_softmax:
+                    attn = attn.float()
+                attn = self.softmax(attn)
+                attn = self.attn_drop(attn).to(qkv.dtype)
+                feat = (attn @ v).transpose(1, 2).reshape(-1, C)
         else:
             feat = flash_attn.flash_attn_varlen_qkvpacked_func(
                 qkv.half().reshape(-1, 3, H, C // H),
@@ -832,6 +839,9 @@ class Sonata(PointModule, PyTorchModelHubMixin):
         num_bins=1280,
     ):
         super().__init__()
+        if enable_flash and flash_attn is None:
+            # flash-attn 2 needs an Ampere+ GPU; fall back to PyTorch SDPA (e.g. Turing T4/T400)
+            enable_flash = False
         self.num_stages = len(enc_depths)
         self.order = [order] if isinstance(order, str) else order
         self.enc_mode = enc_mode
