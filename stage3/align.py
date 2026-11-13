@@ -66,7 +66,7 @@ def auto_up(points, normals, axes):
     return up_idx, a * sign
 
 
-def align(input_path, output_path, ceiling_height=2.6, no_scale=False, up_hint="auto"):
+def align(input_path, output_path, ceiling_height=2.6, no_scale=False, up_hint="auto", metric=False):
     """Write the aligned cloud to output_path and its transform to <output stem>_transform.json; return the transform."""
     pcd = o3d.io.read_point_cloud(input_path)
     pts = np.asarray(pcd.points)
@@ -100,6 +100,15 @@ def align(input_path, output_path, ceiling_height=2.6, no_scale=False, up_hint="
     high = [i for i in peaks if centers[i] > mid]
     floor_z = centers[max(low, key=lambda i: h[i])] if low else np.percentile(p[:, 2], 1)
     ceil_z = centers[max(high, key=lambda i: h[i])] if high else np.percentile(p[:, 2], 99)
+    if metric:
+        # metric clouds (RTAB-Map): floor = densest layer of ALL points in the lowest quarter of the height range,
+        # so furniture tops (beds, tables) are never mistaken for the floor
+        z = p[:, 2]
+        lo, hi = np.percentile(z, 1), np.percentile(z, 99)
+        zz = z[(z >= lo) & (z <= lo + 0.25 * (hi - lo))]
+        hh, ee = np.histogram(zz, np.arange(zz.min(), zz.max() + voxel, voxel))
+        floor_z = 0.5 * (ee[np.argmax(hh)] + ee[np.argmax(hh) + 1])
+        no_scale = True
     raw_height = ceil_z - floor_z
     scale = 1.0 if no_scale else ceiling_height / raw_height
     print(f"up axis (input frame) = {up.round(3)}  floor={floor_z:.3f} ceiling={ceil_z:.3f} raw height={raw_height:.3f}")

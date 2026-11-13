@@ -179,6 +179,7 @@ def main():
                     help="input axis that roughly points up (x, -y, z, ...); auto = smallest room extent (default)")
     ap.add_argument("--aligned", action="store_true",
                     help="input is already aligned (z up, floor at z=0, metres): skip alignment")
+    ap.add_argument("--metric", action="store_true", help="input is metric (RTAB-Map): keep real scale, floor = lowest dense layer")
     ap.add_argument("--no_crop", action="store_true", help="run the arch pass on the full cloud")
     ap.add_argument("--margin", type=float, default=0.3, help="crop margin around the footprint in metres")
     ap.add_argument("--footprint", choices=["auto", "sparse"], default="auto", help="plane-fit footprint mode")
@@ -201,7 +202,7 @@ def main():
         transform = None
         log("input already aligned: copied")
     else:
-        transform = align_mod.align(args.scan, aligned, args.ceiling_height, up_hint=args.up_hint)
+        transform = align_mod.align(args.scan, aligned, args.ceiling_height, up_hint=args.up_hint, metric=args.metric)
 
     # 2. crop
     arch_input = aligned
